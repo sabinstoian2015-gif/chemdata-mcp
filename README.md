@@ -45,7 +45,7 @@ Claude uses the docstring to decide when to call the tool, so describe it well.
 
 ## PDBbind and BindingDB
 PDBbind needs registration and its license restricts redistribution, so it is **not** bundled and a public
-Hugging Face Space must not host it. `pdbbind_lookup` reads your own copy of the index file and works only
+public server must not host it. `pdbbind_lookup` reads your own copy of the index file and works only
 when you run the server on your own PC:
 
     PDBBIND_INDEX=/path/to/INDEX_general_PL_data.2020 python server.py
@@ -58,9 +58,7 @@ Neither BindingDB nor PDBbind tool has been tested against the live service from
 - **Output cap:** every tool result is trimmed to about 12,000 characters (roughly 3k tokens) by cutting the
   largest list, with a `_truncated` note. Change it with the `MAX_RESULT_CHARS` variable.
 - **Cache:** identical database requests are cached for 10 minutes (`CACHE_TTL_S`), so repeats cost nothing.
-- **Secret URL (do this):** a public Space is open to anyone who finds it. In the Space go to
-  Settings -> Variables and secrets -> New secret, name `MCP_PATH`, value `/mcp-<long random string>`
-  (for example `/mcp-k3j9x0q2vb7m4a1z`). Your connector URL then becomes
-  `https://<user>-<space>.hf.space/mcp-k3j9x0q2vb7m4a1z`, and the plain `/mcp` stops working.
+- **Secret URL (do this):** a public server is open to anyone who finds it. Set the `MCP_PATH` environment
+  variable to `/mcp-<long random string>`; the connector URL then ends in that path and plain `/mcp` stops working.
   Never share that URL.
 - Nothing runs when you are not asking: an idle connector uses none of your Claude usage.
