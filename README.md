@@ -1,6 +1,6 @@
 # chemdata-mcp — RCSB PDB + PubChem + UniProt + BindingDB as one connector
 
-One remote MCP server with 20 tools: 7 for RCSB PDB (including structure geometry), 5 for PubChem, 4 for UniProt, 3 for BindingDB and 1 for local PDBbind. ChEMBL is left out on purpose: use the directory ChEMBL connector. For dG from Ki/Kd use -1.364 x pKd kcal/mol at 298 K.
+One remote MCP server with 19 tools: 6 for RCSB PDB (including pocket geometry), 5 for PubChem, 4 for UniProt, 3 for BindingDB and 1 for local PDBbind. ChEMBL is left out on purpose: use the directory ChEMBL connector. For dG from Ki/Kd use -1.364 x pKd kcal/mol at 298 K.
 It uses no API keys and has no authentication, because it only proxies public data.
 
 ## Deploy free on Render
@@ -31,8 +31,6 @@ time out. Ask again.
 | pdb_entry_details | pubchem_bioassays |
 
 **Structure geometry** (downloads the mmCIF and parses it with gemmi):
-- `pdb_halogen_bonds`: finds C–X···O/N/S contacts (X = Cl, Br, I, At) where the distance is at most the sum of the vdW radii
-  and θ1 ≥ 140°. Reports the distance, normalized distance, θ1, θ2, and whether the acceptor is backbone or side chain.
 - `pdb_ligand_environment`: pocket residues around a ligand, plus its centroid and box size (useful for Vina).
 - `pdb_entry_details` returns each ligand's InChIKey/SMILES, which you can use in the ChEMBL connector.
 

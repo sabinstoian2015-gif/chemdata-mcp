@@ -26,10 +26,10 @@ mcp = FastMCP(
     "chemdata",
     instructions=(
         "Public structural-biology / chemistry data. RCSB PDB = 3D structures, bound ligands and geometry "
-        "(pdb_halogen_bonds, pdb_ligand_environment), PubChem = compound properties and similarity, UniProt = "
+        "(pdb_ligand_environment), PubChem = compound properties and similarity, UniProt = "
         "protein function, domains, sites and sequences, BindingDB = measured Ki/Kd/IC50 linked to PDB entries. "
         "ChEMBL is a separate connector. Typical flow: uniprot_search -> pdb_search_by_uniprot -> "
-        "pdb_entry_details -> pdb_halogen_bonds; bindingdb_by_pdb for affinity."
+        "pdb_entry_details; bindingdb_by_pdb for affinity."
     ),
 
     host="0.0.0.0",
@@ -333,8 +333,6 @@ async def pubchem_bioassays(cid: int, active_only: bool = True, limit: int = 50)
 # ======================================================= Structure geometry
 # Bondi vdW radii (At estimated). Used for X...Y contact criterion.
 VDW = {"O": 1.52, "N": 1.55, "S": 1.80, "F": 1.47, "CL": 1.75, "BR": 1.85, "I": 1.98, "AT": 2.02, "SE": 1.90}
-HALOGENS = {"CL", "BR", "I", "AT"}
-ACCEPTORS = {"O", "N", "S"}
 WATER = {"HOH", "WAT", "DOD", "H2O"}
 
 _struct_cache: dict[str, Any] = {}
@@ -371,90 +369,7 @@ def _atoms(st) -> list[dict]:
     return out
 
 
-def _angle(a, b, c) -> float:
-    """Angle at b (degrees)."""
-    import math
-    v1 = (a.x - b.x, a.y - b.y, a.z - b.z)
-    v2 = (c.x - b.x, c.y - b.y, c.z - b.z)
-    dot = sum(i * j for i, j in zip(v1, v2))
-    n = math.sqrt(sum(i * i for i in v1)) * math.sqrt(sum(i * i for i in v2))
-    return math.degrees(math.acos(max(-1.0, min(1.0, dot / n)))) if n else 0.0
 
-
-def _nearest_bonded(atom: dict, pool: list[dict], max_d: float) -> dict | None:
-    best, bd = None, max_d
-    for o in pool:
-        if o is atom or o["el"] == "H":
-            continue
-        d = atom["pos"].dist(o["pos"])
-        if 0.5 < d < bd:
-            best, bd = o, d
-    return best
-
-
-def _label(a: dict) -> str:
-    return f"{a['resname']} {a['chain']}{a['resnum']}{a['icode']}:{a['name']}"
-
-
-@tool
-async def pdb_halogen_bonds(
-    pdb_ids: list[str],
-    tolerance: float = 0.0,
-    min_theta1: float = 140.0,
-    include_water: bool = False,
-    include_polymer_halogens: bool = False,
-) -> list[dict]:
-    """Detect geometric halogen bonds C-X...Y (X = Cl/Br/I/At on ligands; Y = O/N/S) in up to 10 PDB entries.
-    Criteria: d(X...Y) <= sum of Bondi vdW radii + tolerance (A), theta1 = angle(C-X...Y) >= min_theta1.
-    Also reports theta2 = angle(X...Y-R) (~90-130 deg typical for carbonyl O) and normalized distance
-    d/sum_vdW (lower = stronger). Use for spot-checking; for PDB-wide surveys run a batch script."""
-    results = []
-    for pid in pdb_ids[:10]:
-        try:
-            st = await _load_structure(pid)
-        except Exception as ex:  # noqa: BLE001
-            results.append({"pdb_id": pid.upper(), "error": str(ex)})
-            continue
-        atoms = _atoms(st)
-        by_res: dict[tuple, list[dict]] = {}
-        for a in atoms:
-            by_res.setdefault(a["key"], []).append(a)
-        donors = [a for a in atoms if a["el"] in HALOGENS and (a["het"] or include_polymer_halogens)
-                  and a["resname"] not in WATER]
-        accs = [a for a in atoms if a["el"] in ACCEPTORS and (include_water or a["resname"] not in WATER)]
-        contacts = []
-        for x in donors:
-            c = _nearest_bonded(x, by_res[x["key"]], 2.3)
-            if c is None:
-                continue
-            for y in accs:
-                if y["key"] == x["key"]:
-                    continue  # intramolecular
-                d = x["pos"].dist(y["pos"])
-                rsum = VDW[x["el"]] + VDW[y["el"]]
-                if d > rsum + tolerance or d < 2.0:
-                    continue
-                t1 = _angle(c["pos"], x["pos"], y["pos"])
-                if t1 < min_theta1:
-                    continue
-                r = _nearest_bonded(y, by_res[y["key"]], 1.95)
-                contacts.append({
-                    "halogen": _label(x), "donor_carbon": c["name"], "acceptor": _label(y),
-                    "acceptor_type": "backbone" if (not y["het"] and y["name"] in ("O", "N", "OXT")) else
-                                     ("water" if y["resname"] in WATER else ("side chain" if not y["het"] else "het")),
-                    "distance_A": round(d, 2), "norm_distance": round(d / rsum, 3),
-                    "theta1_CXY": round(t1, 1),
-                    "theta2_XYR": round(_angle(x["pos"], y["pos"], r["pos"]), 1) if r else None,
-                    "altlocs": "".join(sorted({x["altloc"], y["altloc"]} - {"\x00", " ", ""})) or None,
-                })
-        contacts.sort(key=lambda k: k["norm_distance"])
-        results.append({
-            "pdb_id": pid.upper(),
-            "resolution_A": round(st.resolution, 2) if st.resolution else None,
-            "halogen_atoms_on_ligands": len(donors),
-            "halogen_bonds": contacts,
-        })
-    return results
 
 
 @tool
