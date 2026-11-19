@@ -1,5 +1,5 @@
 """
-chemdata-mcp: one remote MCP server exposing RCSB PDB, PubChem, UniProt and BindingDB
+chemdata-mcp: one remote MCP server exposing ChEMBL, RCSB PDB, PubChem, UniProt and BindingDB
 as tools for Claude custom connectors.
 
 Run locally:   python server.py          -> http://localhost:7860/mcp
@@ -17,6 +17,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 RCSB_SEARCH = "https://search.rcsb.org/rcsbsearch/v2/query"
 RCSB_GRAPHQL = "https://data.rcsb.org/graphql"
+CHEMBL = "https://www.ebi.ac.uk/chembl/api/data"
 PUBCHEM = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 
 TIMEOUT = httpx.Timeout(30.0, connect=10.0)
@@ -28,8 +29,9 @@ mcp = FastMCP(
         "Public structural-biology / chemistry data. RCSB PDB = 3D structures, bound ligands and geometry "
         "(pdb_ligand_environment), PubChem = compound properties and similarity, UniProt = "
         "protein function, domains, sites and sequences, BindingDB = measured Ki/Kd/IC50 linked to PDB entries. "
-        "ChEMBL is a separate connector. Typical flow: uniprot_search -> pdb_search_by_uniprot -> "
-        "pdb_entry_details; bindingdb_by_pdb for affinity."
+        "ChEMBL = bioactivity from the live current release (chembl_status shows which). Typical flow: "
+        "uniprot_search -> chembl_search_targets -> chembl_target_activities; pdb_search_by_uniprot -> "
+        "pdb_entry_details -> chembl_molecule (by InChIKey) -> chembl_molecule_activities for affinity / dG."
     ),
 
     host="0.0.0.0",
@@ -117,6 +119,146 @@ async def _post(url: str, *, json: Any = None, data: dict | None = None) -> Any:
 
 def _clip(n: int, lo: int = 1, hi: int = 200) -> int:
     return max(lo, min(hi, n))
+
+
+# =================================================================== ChEMBL
+# Live EBI REST API, so it always serves the current ChEMBL release (see chembl_status).
+import re as _re
+
+_CHEMBL_ID = _re.compile(r"^CHEMBL\d+$")
+
+
+def _cid(x: str) -> str:
+    x = x.strip().upper()
+    if not _CHEMBL_ID.match(x):
+        raise ValueError(f"not a ChEMBL ID: {x!r}")
+    return x
+
+
+@tool
+async def chembl_status() -> dict:
+    """Which ChEMBL release the live API is serving (e.g. ChEMBL_37) and its record counts."""
+    d = await _get(f"{CHEMBL}/status.json")
+    return {k: d.get(k) for k in ("chembl_db_version", "chembl_release_date", "activities", "compounds",
+                                   "targets", "publications") if k in d} or d
+
+
+@tool
+async def chembl_search_targets(query: str, organism: str = "Homo sapiens", limit: int = 10) -> list[dict]:
+    """Find ChEMBL targets by name/gene/keyword (e.g. 'PAK1'). Check the name: gene searches can also
+    return related kinases. Returns target_chembl_id, name, type, organism, UniProt accessions."""
+    d = await _get(f"{CHEMBL}/target/search.json", {"q": query, "limit": 100})
+    out = []
+    for t in d.get("targets", []):
+        if organism and (t.get("organism") or "").lower() != organism.lower():
+            continue
+        if len(out) >= _clip(limit, hi=50):
+            break
+        out.append({
+            "target_chembl_id": t.get("target_chembl_id"), "name": t.get("pref_name"),
+            "type": t.get("target_type"), "organism": t.get("organism"),
+            "uniprot": [c.get("accession") for c in t.get("target_components", []) if c.get("accession")],
+        })
+    return out
+
+
+def _act_row(a: dict) -> dict:
+    p = float(a["pchembl_value"]) if a.get("pchembl_value") else None
+    row = {
+        "molecule_chembl_id": a.get("molecule_chembl_id"), "name": a.get("molecule_pref_name"),
+        "smiles": a.get("canonical_smiles"), "type": a.get("standard_type"),
+        "relation": a.get("standard_relation"), "value": a.get("standard_value"),
+        "units": a.get("standard_units"), "pchembl": p,
+        "assay_chembl_id": a.get("assay_chembl_id"), "assay_type": a.get("assay_type"),
+        "target_chembl_id": a.get("target_chembl_id"), "year": a.get("document_year"),
+        "document_chembl_id": a.get("document_chembl_id"),
+    }
+    if p is not None and a.get("standard_type") in ("Ki", "Kd") and a.get("standard_relation") == "=":
+        row["dG_kcal_mol"] = round(-1.3642 * p, 2)  # -RT ln(10) pKd at 298 K; Ki/Kd only
+    return {k: v for k, v in row.items() if v not in (None, "")}
+
+
+@tool
+async def chembl_target_activities(target_chembl_id: str, standard_type: str = "IC50",
+                                   min_pchembl: float = 6.0, limit: int = 50) -> dict:
+    """Bioactivities for a target, most potent first. standard_type: IC50, Ki, Kd, EC50 or '' for all.
+    min_pchembl 6 = 1 uM, 7 = 100 nM. Ki/Kd rows include dG_kcal_mol (= -1.364 x pChEMBL, 298 K);
+    IC50-derived values are NOT binding free energies."""
+    params: dict[str, Any] = {"target_chembl_id": _cid(target_chembl_id), "pchembl_value__gte": min_pchembl,
+                              "order_by": "-pchembl_value", "limit": _clip(limit, hi=500)}
+    if standard_type:
+        params["standard_type"] = standard_type
+    d = await _get(f"{CHEMBL}/activity.json", params)
+    rows = [_act_row(a) for a in d.get("activities", [])]
+    return {"total_matching": d.get("page_meta", {}).get("total_count"), "returned": len(rows), "activities": rows}
+
+
+@tool
+async def chembl_molecule_activities(molecule_chembl_id: str, standard_types: list[str] | None = None,
+                                     target_chembl_id: str = "", limit: int = 100) -> dict:
+    """All measured activities of one compound across targets (default Ki, Kd, IC50), most potent first.
+    Ki/Kd rows include dG_kcal_mol. Optionally restrict to one target."""
+    params: dict[str, Any] = {"molecule_chembl_id": _cid(molecule_chembl_id),
+                              "standard_type__in": ",".join(standard_types or ["Ki", "Kd", "IC50"]),
+                              "pchembl_value__isnull": "false", "order_by": "-pchembl_value",
+                              "limit": _clip(limit, hi=500)}
+    if target_chembl_id:
+        params["target_chembl_id"] = _cid(target_chembl_id)
+    d = await _get(f"{CHEMBL}/activity.json", params)
+    return {"total_matching": d.get("page_meta", {}).get("total_count"),
+            "activities": [_act_row(a) for a in d.get("activities", [])]}
+
+
+def _mol_row(m: dict) -> dict:
+    p = m.get("molecule_properties") or {}
+    s = m.get("molecule_structures") or {}
+    row = {"chembl_id": m.get("molecule_chembl_id"), "name": m.get("pref_name"), "max_phase": m.get("max_phase"),
+           "smiles": s.get("canonical_smiles"), "inchikey": s.get("standard_inchi_key"),
+           "similarity": m.get("similarity"), "mw": p.get("full_mwt"), "alogp": p.get("alogp"),
+           "psa": p.get("psa"), "hbd": p.get("hbd"), "hba": p.get("hba"), "rtb": p.get("rtb"),
+           "ro5_violations": p.get("num_ro5_violations"), "qed": p.get("qed_weighted")}
+    return {k: v for k, v in row.items() if v not in (None, "")}
+
+
+@tool
+async def chembl_molecule(identifier: str) -> dict:
+    """Look up a compound by ChEMBL ID (CHEMBL25), standard InChIKey (27 chars, e.g. from PDB ligands),
+    or name ('imatinib'). Returns structures and drug-likeness properties."""
+    ident = identifier.strip()
+    if ident.upper().startswith("CHEMBL") or (len(ident) == 27 and ident.count("-") == 2):
+        mols = [await _get(f"{CHEMBL}/molecule/{ident.upper()}.json")]
+    else:
+        mols = (await _get(f"{CHEMBL}/molecule/search.json", {"q": ident, "limit": 5})).get("molecules", [])
+    return {"results": [_mol_row(m) for m in mols if m and "error" not in m]}
+
+
+@tool
+async def chembl_similarity(smiles: str, threshold: int = 70, limit: int = 25) -> list[dict]:
+    """ChEMBL Tanimoto similarity search (threshold 40-100)."""
+    url = f"{CHEMBL}/similarity/{quote(smiles, safe='')}/{max(40, min(100, threshold))}.json"
+    d = await _get(url, {"limit": _clip(limit, hi=100)})
+    return [_mol_row(m) for m in d.get("molecules", [])]
+
+
+@tool
+async def chembl_substructure(smiles: str, limit: int = 25) -> list[dict]:
+    """ChEMBL substructure search for compounds containing the given SMILES fragment."""
+    d = await _get(f"{CHEMBL}/substructure/{quote(smiles, safe='')}.json", {"limit": _clip(limit, hi=100)})
+    return [_mol_row(m) for m in d.get("molecules", [])]
+
+
+@tool
+async def chembl_mechanisms(target_chembl_id: str = "", molecule_chembl_id: str = "") -> list[dict]:
+    """Known drug mechanisms of action, filtered by target and/or molecule."""
+    params: dict[str, Any] = {"limit": 100}
+    if target_chembl_id:
+        params["target_chembl_id"] = _cid(target_chembl_id)
+    if molecule_chembl_id:
+        params["molecule_chembl_id"] = _cid(molecule_chembl_id)
+    d = await _get(f"{CHEMBL}/mechanism.json", params)
+    return [{"molecule_chembl_id": m.get("molecule_chembl_id"), "target_chembl_id": m.get("target_chembl_id"),
+             "mechanism": m.get("mechanism_of_action"), "action_type": m.get("action_type"),
+             "max_phase": m.get("max_phase")} for m in d.get("mechanisms", [])]
 
 
 # ================================================================= RCSB PDB

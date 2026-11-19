@@ -6,6 +6,7 @@ from mcp.client.streamable_http import streamablehttp_client
 
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:7860/mcp"
 CALLS = [
+    ("chembl_status", {}),
     ("pdb_search_by_uniprot", {"uniprot_accession": "Q13153", "limit": 5}),
     ("pubchem_compound", {"identifier": "aspirin"}),
     ("bindingdb_by_pdb", {"pdb_id": "1Q0L"}),

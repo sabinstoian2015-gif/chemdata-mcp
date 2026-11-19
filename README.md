@@ -1,6 +1,6 @@
 # chemdata-mcp — RCSB PDB + PubChem + UniProt + BindingDB as one connector
 
-One remote MCP server with 19 tools: 6 for RCSB PDB (including pocket geometry), 5 for PubChem, 4 for UniProt, 3 for BindingDB and 1 for local PDBbind. ChEMBL is left out on purpose: use the directory ChEMBL connector. For dG from Ki/Kd use -1.364 x pKd kcal/mol at 298 K.
+One remote MCP server with 27 tools: 8 for ChEMBL, 6 for RCSB PDB (including pocket geometry), 5 for PubChem, 4 for UniProt, 3 for BindingDB and 1 for local PDBbind. ChEMBL tools query the live EBI API, so they follow the current release (call `chembl_status`). Ki/Kd rows carry dG = -1.364 x pKd kcal/mol at 298 K.
 It uses no API keys and has no authentication, because it only proxies public data.
 
 ## Deploy free on Render
@@ -22,6 +22,9 @@ time out. Ask again.
     cloudflared tunnel --url http://localhost:7860     # public https URL for Claude/ChatGPT
 
 ## Tools
+**ChEMBL:** chembl_status (which release is live), chembl_search_targets, chembl_target_activities, chembl_molecule_activities,
+chembl_molecule (ID / InChIKey / name), chembl_similarity, chembl_substructure, chembl_mechanisms.
+
 | RCSB PDB | PubChem |
 |---|---|
 | pdb_search_by_uniprot | pubchem_compound |
